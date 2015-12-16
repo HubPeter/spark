@@ -17,11 +17,10 @@
 
 package org.apache.spark.sql.execution.datasources.jdbc
 
-import java.sql.{Connection, DriverManager, ResultSet, ResultSetMetaData, SQLException}
+import java.sql.{Connection, DriverManager, ResultSet, SQLException}
 import java.util.Properties
 
 import org.apache.commons.lang3.StringUtils
-
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.SpecificMutableRow
@@ -50,53 +49,61 @@ private[sql] object JDBCRDD extends Logging {
    * @return The Catalyst type corresponding to sqlType.
    */
   private def getCatalystType(
-      sqlType: Int,
-      precision: Int,
-      scale: Int,
-      signed: Boolean): DataType = {
+                               sqlType: Int,
+                               precision: Int,
+                               scale: Int,
+                               signed: Boolean): DataType = {
     val answer = sqlType match {
       // scalastyle:off
-      case java.sql.Types.ARRAY         => null
-      case java.sql.Types.BIGINT        => if (signed) { LongType } else { DecimalType(20,0) }
-      case java.sql.Types.BINARY        => BinaryType
-      case java.sql.Types.BIT           => BooleanType // @see JdbcDialect for quirks
-      case java.sql.Types.BLOB          => BinaryType
-      case java.sql.Types.BOOLEAN       => BooleanType
-      case java.sql.Types.CHAR          => StringType
-      case java.sql.Types.CLOB          => StringType
-      case java.sql.Types.DATALINK      => null
-      case java.sql.Types.DATE          => DateType
+      case java.sql.Types.ARRAY => null
+      case java.sql.Types.BIGINT => if (signed) {
+        LongType
+      } else {
+        DecimalType(20, 0)
+      }
+      case java.sql.Types.BINARY => BinaryType
+      case java.sql.Types.BIT => BooleanType // @see JdbcDialect for quirks
+      case java.sql.Types.BLOB => BinaryType
+      case java.sql.Types.BOOLEAN => BooleanType
+      case java.sql.Types.CHAR => StringType
+      case java.sql.Types.CLOB => StringType
+      case java.sql.Types.DATALINK => null
+      case java.sql.Types.DATE => DateType
       case java.sql.Types.DECIMAL
         if precision != 0 || scale != 0 => DecimalType.bounded(precision, scale)
-      case java.sql.Types.DECIMAL       => DecimalType.SYSTEM_DEFAULT
-      case java.sql.Types.DISTINCT      => null
-      case java.sql.Types.DOUBLE        => DoubleType
-      case java.sql.Types.FLOAT         => FloatType
-      case java.sql.Types.INTEGER       => if (signed) { IntegerType } else { LongType }
-      case java.sql.Types.JAVA_OBJECT   => null
-      case java.sql.Types.LONGNVARCHAR  => StringType
+      case java.sql.Types.DECIMAL => DecimalType.SYSTEM_DEFAULT
+      case java.sql.Types.DISTINCT => null
+      case java.sql.Types.DOUBLE => DoubleType
+      case java.sql.Types.FLOAT => FloatType
+      case java.sql.Types.INTEGER => if (signed) {
+        IntegerType
+      } else {
+        LongType
+      }
+      case java.sql.Types.JAVA_OBJECT => null
+      case java.sql.Types.LONGNVARCHAR => StringType
       case java.sql.Types.LONGVARBINARY => BinaryType
-      case java.sql.Types.LONGVARCHAR   => StringType
-      case java.sql.Types.NCHAR         => StringType
-      case java.sql.Types.NCLOB         => StringType
-      case java.sql.Types.NULL          => null
+      case java.sql.Types.LONGVARCHAR => StringType
+      case java.sql.Types.NCHAR => StringType
+      case java.sql.Types.NCLOB => StringType
+      case java.sql.Types.NULL => null
       case java.sql.Types.NUMERIC
         if precision != 0 || scale != 0 => DecimalType.bounded(precision, scale)
-      case java.sql.Types.NUMERIC       => DecimalType.SYSTEM_DEFAULT
-      case java.sql.Types.NVARCHAR      => StringType
-      case java.sql.Types.OTHER         => null
-      case java.sql.Types.REAL          => DoubleType
-      case java.sql.Types.REF           => StringType
-      case java.sql.Types.ROWID         => LongType
-      case java.sql.Types.SMALLINT      => IntegerType
-      case java.sql.Types.SQLXML        => StringType
-      case java.sql.Types.STRUCT        => StringType
-      case java.sql.Types.TIME          => TimestampType
-      case java.sql.Types.TIMESTAMP     => TimestampType
-      case java.sql.Types.TINYINT       => IntegerType
-      case java.sql.Types.VARBINARY     => BinaryType
-      case java.sql.Types.VARCHAR       => StringType
-      case _                            => null
+      case java.sql.Types.NUMERIC => DecimalType.SYSTEM_DEFAULT
+      case java.sql.Types.NVARCHAR => StringType
+      case java.sql.Types.OTHER => null
+      case java.sql.Types.REAL => DoubleType
+      case java.sql.Types.REF => StringType
+      case java.sql.Types.ROWID => LongType
+      case java.sql.Types.SMALLINT => IntegerType
+      case java.sql.Types.SQLXML => StringType
+      case java.sql.Types.STRUCT => StringType
+      case java.sql.Types.TIME => TimestampType
+      case java.sql.Types.TIMESTAMP => TimestampType
+      case java.sql.Types.TINYINT => IntegerType
+      case java.sql.Types.VARBINARY => BinaryType
+      case java.sql.Types.VARCHAR => StringType
+      case _ => null
       // scalastyle:on
     }
 
@@ -110,30 +117,45 @@ private[sql] object JDBCRDD extends Logging {
    *
    * @param url - The JDBC url to fetch information from.
    * @param table - The table name of the desired table.  This may also be a
-   *   SQL query wrapped in parentheses.
+   *              SQL query wrapped in parentheses.
    *
    * @return A StructType giving the table's Catalyst schema.
    * @throws SQLException if the table specification is garbage.
    * @throws SQLException if the table contains an unsupported type.
    */
+
   def resolveTable(url: String, table: String, properties: Properties): StructType = {
     val dialect = JdbcDialects.get(url)
-    val conn: Connection = getConnector(properties.getProperty("driver"), url, properties)()
+    var conn: Connection = getConnector(properties.getProperty("driver"), url, properties)()
     try {
-      val rs = conn.prepareStatement(s"SELECT * FROM $table WHERE 1=0").executeQuery()
+      var rs = conn.prepareStatement(s"SELECT * FROM $table WHERE 1=0").executeQuery()
+      if (rs == null) {
+        log.warn("rs is null, try to use statement and limit 1 query with reconnection")
+        conn.close
+        conn = getConnector(properties.getProperty("driver"), url, properties)()
+        val stmt = conn.createStatement()
+        stmt.execute(s"SELECT * FROM $table limit 1")
+        rs = stmt.getResultSet
+        log.warn("rs is null? " + (rs == null))
+      }
+
       try {
         val rsmd = rs.getMetaData
         val ncols = rsmd.getColumnCount
         val fields = new Array[StructField](ncols)
         var i = 0
         while (i < ncols) {
-          val columnName = rsmd.getColumnLabel(i + 1)
+          val columnName = rsmd.getColumnLabel(i + 1);
           val dataType = rsmd.getColumnType(i + 1)
           val typeName = rsmd.getColumnTypeName(i + 1)
-          val fieldSize = rsmd.getPrecision(i + 1)
-          val fieldScale = rsmd.getScale(i + 1)
-          val isSigned = rsmd.isSigned(i + 1)
-          val nullable = rsmd.isNullable(i + 1) != ResultSetMetaData.columnNoNulls
+          //          val fieldSize = rsmd.getPrecision(i + 1)
+          val fieldSize = 50
+          //          val fieldScale = rsmd.getScale(i + 1)
+          val fieldScale = 0
+          //          val isSigned = rsmd.isSigned(i + 1)
+          val isSigned = true
+          //          val nullable = rsmd.isNullable(i + 1) != ResultSetMetaData.columnNoNulls
+          val nullable = true
           val metadata = new MetadataBuilder().putString("name", columnName)
           val columnType =
             dialect.getCatalystType(dataType, typeName, fieldSize, metadata).getOrElse(
@@ -172,7 +194,7 @@ private[sql] object JDBCRDD extends Logging {
    * is run on the executor.
    *
    * @param driver - The class name of the JDBC driver for the given url, or null if the class name
-   *                 is not necessary.
+   *               is not necessary.
    * @param url - The JDBC url to connect to.
    *
    * @return A function that loads the driver and connects to the url.
@@ -200,20 +222,20 @@ private[sql] object JDBCRDD extends Logging {
    * @param requiredColumns - The names of the columns to SELECT.
    * @param filters - The filters to include in all WHERE clauses.
    * @param parts - An array of JDBCPartitions specifying partition ids and
-   *    per-partition WHERE clauses.
+   *              per-partition WHERE clauses.
    *
    * @return An RDD representing "SELECT requiredColumns FROM fqTable".
    */
   def scanTable(
-      sc: SparkContext,
-      schema: StructType,
-      driver: String,
-      url: String,
-      properties: Properties,
-      fqTable: String,
-      requiredColumns: Array[String],
-      filters: Array[Filter],
-      parts: Array[Partition]): RDD[InternalRow] = {
+                 sc: SparkContext,
+                 schema: StructType,
+                 driver: String,
+                 url: String,
+                 properties: Properties,
+                 fqTable: String,
+                 requiredColumns: Array[String],
+                 filters: Array[Filter],
+                 parts: Array[Partition]): RDD[InternalRow] = {
     val dialect = JdbcDialects.get(url)
     val quotedColumns = requiredColumns.map(colName => dialect.quoteIdentifier(colName))
     new JDBCRDD(
@@ -234,14 +256,14 @@ private[sql] object JDBCRDD extends Logging {
  * needs to fetch the schema while the workers need to fetch the data.
  */
 private[sql] class JDBCRDD(
-    sc: SparkContext,
-    getConnection: () => Connection,
-    schema: StructType,
-    fqTable: String,
-    columns: Array[String],
-    filters: Array[Filter],
-    partitions: Array[Partition],
-    properties: Properties)
+                            sc: SparkContext,
+                            getConnection: () => Connection,
+                            schema: StructType,
+                            fqTable: String,
+                            columns: Array[String],
+                            filters: Array[Filter],
+                            partitions: Array[Partition],
+                            properties: Properties)
   extends RDD[InternalRow](sc, Nil) {
 
   /**
@@ -313,16 +335,27 @@ private[sql] class JDBCRDD(
   // Is there a better way to do this?  I'd rather be using a type that
   // contains only the tags I define.
   abstract class JDBCConversion
+
   case object BooleanConversion extends JDBCConversion
+
   case object DateConversion extends JDBCConversion
-  case class  DecimalConversion(precision: Int, scale: Int) extends JDBCConversion
+
+  case class DecimalConversion(precision: Int, scale: Int) extends JDBCConversion
+
   case object DoubleConversion extends JDBCConversion
+
   case object FloatConversion extends JDBCConversion
+
   case object IntegerConversion extends JDBCConversion
+
   case object LongConversion extends JDBCConversion
+
   case object BinaryLongConversion extends JDBCConversion
+
   case object StringConversion extends JDBCConversion
+
   case object TimestampConversion extends JDBCConversion
+
   case object BinaryConversion extends JDBCConversion
 
   /**
@@ -351,141 +384,141 @@ private[sql] class JDBCRDD(
    */
   override def compute(thePart: Partition, context: TaskContext): Iterator[InternalRow] =
     new Iterator[InternalRow] {
-    var closed = false
-    var finished = false
-    var gotNext = false
-    var nextValue: InternalRow = null
+      var closed = false
+      var finished = false
+      var gotNext = false
+      var nextValue: InternalRow = null
 
-    context.addTaskCompletionListener{ context => close() }
-    val part = thePart.asInstanceOf[JDBCPartition]
-    val conn = getConnection()
+      context.addTaskCompletionListener { context => close() }
+      val part = thePart.asInstanceOf[JDBCPartition]
+      val conn = getConnection()
 
-    // H2's JDBC driver does not support the setSchema() method.  We pass a
-    // fully-qualified table name in the SELECT statement.  I don't know how to
-    // talk about a table in a completely portable way.
+      // H2's JDBC driver does not support the setSchema() method.  We pass a
+      // fully-qualified table name in the SELECT statement.  I don't know how to
+      // talk about a table in a completely portable way.
 
-    val myWhereClause = getWhereClause(part)
+      val myWhereClause = getWhereClause(part)
 
-    val sqlText = s"SELECT $columnList FROM $fqTable $myWhereClause"
-    val stmt = conn.prepareStatement(sqlText,
+      val sqlText = s"SELECT $columnList FROM $fqTable $myWhereClause"
+      val stmt = conn.prepareStatement(sqlText,
         ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)
-    val fetchSize = properties.getProperty("fetchsize", "0").toInt
-    stmt.setFetchSize(fetchSize)
-    val rs = stmt.executeQuery()
+      val fetchSize = properties.getProperty("fetchsize", "0").toInt
+      stmt.setFetchSize(fetchSize)
+      val rs = stmt.executeQuery()
 
-    val conversions = getConversions(schema)
-    val mutableRow = new SpecificMutableRow(schema.fields.map(x => x.dataType))
+      val conversions = getConversions(schema)
+      val mutableRow = new SpecificMutableRow(schema.fields.map(x => x.dataType))
 
-    def getNext(): InternalRow = {
-      if (rs.next()) {
-        var i = 0
-        while (i < conversions.length) {
-          val pos = i + 1
-          conversions(i) match {
-            case BooleanConversion => mutableRow.setBoolean(i, rs.getBoolean(pos))
-            case DateConversion =>
-              // DateTimeUtils.fromJavaDate does not handle null value, so we need to check it.
-              val dateVal = rs.getDate(pos)
-              if (dateVal != null) {
-                mutableRow.setInt(i, DateTimeUtils.fromJavaDate(dateVal))
-              } else {
-                mutableRow.update(i, null)
+      def getNext(): InternalRow = {
+        if (rs.next()) {
+          var i = 0
+          while (i < conversions.length) {
+            val pos = i + 1
+            conversions(i) match {
+              case BooleanConversion => mutableRow.setBoolean(i, rs.getBoolean(pos))
+              case DateConversion =>
+                // DateTimeUtils.fromJavaDate does not handle null value, so we need to check it.
+                val dateVal = rs.getDate(pos)
+                if (dateVal != null) {
+                  mutableRow.setInt(i, DateTimeUtils.fromJavaDate(dateVal))
+                } else {
+                  mutableRow.update(i, null)
+                }
+              // When connecting with Oracle DB through JDBC, the precision and scale of BigDecimal
+              // object returned by ResultSet.getBigDecimal is not correctly matched to the table
+              // schema reported by ResultSetMetaData.getPrecision and ResultSetMetaData.getScale.
+              // If inserting values like 19999 into a column with NUMBER(12, 2) type, you get through
+              // a BigDecimal object with scale as 0. But the dataframe schema has correct type as
+              // DecimalType(12, 2). Thus, after saving the dataframe into parquet file and then
+              // retrieve it, you will get wrong result 199.99.
+              // So it is needed to set precision and scale for Decimal based on JDBC metadata.
+              case DecimalConversion(p, s) =>
+                val decimalVal = rs.getBigDecimal(pos)
+                if (decimalVal == null) {
+                  mutableRow.update(i, null)
+                } else {
+                  mutableRow.update(i, Decimal(decimalVal, p, s))
+                }
+              case DoubleConversion => mutableRow.setDouble(i, rs.getDouble(pos))
+              case FloatConversion => mutableRow.setFloat(i, rs.getFloat(pos))
+              case IntegerConversion => mutableRow.setInt(i, rs.getInt(pos))
+              case LongConversion => mutableRow.setLong(i, rs.getLong(pos))
+              // TODO(davies): use getBytes for better performance, if the encoding is UTF-8
+              case StringConversion => mutableRow.update(i, UTF8String.fromString(rs.getString(pos)))
+              case TimestampConversion =>
+                val t = rs.getTimestamp(pos)
+                if (t != null) {
+                  mutableRow.setLong(i, DateTimeUtils.fromJavaTimestamp(t))
+                } else {
+                  mutableRow.update(i, null)
+                }
+              case BinaryConversion => mutableRow.update(i, rs.getBytes(pos))
+              case BinaryLongConversion => {
+                val bytes = rs.getBytes(pos)
+                var ans = 0L
+                var j = 0
+                while (j < bytes.size) {
+                  ans = 256 * ans + (255 & bytes(j))
+                  j = j + 1;
+                }
+                mutableRow.setLong(i, ans)
               }
-            // When connecting with Oracle DB through JDBC, the precision and scale of BigDecimal
-            // object returned by ResultSet.getBigDecimal is not correctly matched to the table
-            // schema reported by ResultSetMetaData.getPrecision and ResultSetMetaData.getScale.
-            // If inserting values like 19999 into a column with NUMBER(12, 2) type, you get through
-            // a BigDecimal object with scale as 0. But the dataframe schema has correct type as
-            // DecimalType(12, 2). Thus, after saving the dataframe into parquet file and then
-            // retrieve it, you will get wrong result 199.99.
-            // So it is needed to set precision and scale for Decimal based on JDBC metadata.
-            case DecimalConversion(p, s) =>
-              val decimalVal = rs.getBigDecimal(pos)
-              if (decimalVal == null) {
-                mutableRow.update(i, null)
-              } else {
-                mutableRow.update(i, Decimal(decimalVal, p, s))
-              }
-            case DoubleConversion => mutableRow.setDouble(i, rs.getDouble(pos))
-            case FloatConversion => mutableRow.setFloat(i, rs.getFloat(pos))
-            case IntegerConversion => mutableRow.setInt(i, rs.getInt(pos))
-            case LongConversion => mutableRow.setLong(i, rs.getLong(pos))
-            // TODO(davies): use getBytes for better performance, if the encoding is UTF-8
-            case StringConversion => mutableRow.update(i, UTF8String.fromString(rs.getString(pos)))
-            case TimestampConversion =>
-              val t = rs.getTimestamp(pos)
-              if (t != null) {
-                mutableRow.setLong(i, DateTimeUtils.fromJavaTimestamp(t))
-              } else {
-                mutableRow.update(i, null)
-              }
-            case BinaryConversion => mutableRow.update(i, rs.getBytes(pos))
-            case BinaryLongConversion => {
-              val bytes = rs.getBytes(pos)
-              var ans = 0L
-              var j = 0
-              while (j < bytes.size) {
-                ans = 256 * ans + (255 & bytes(j))
-                j = j + 1;
-              }
-              mutableRow.setLong(i, ans)
             }
+            if (rs.wasNull) mutableRow.setNullAt(i)
+            i = i + 1
           }
-          if (rs.wasNull) mutableRow.setNullAt(i)
-          i = i + 1
+          mutableRow
+        } else {
+          finished = true
+          null.asInstanceOf[InternalRow]
         }
-        mutableRow
-      } else {
-        finished = true
-        null.asInstanceOf[InternalRow]
       }
-    }
 
-    def close() {
-      if (closed) return
-      try {
-        if (null != rs) {
-          rs.close()
-        }
-      } catch {
-        case e: Exception => logWarning("Exception closing resultset", e)
-      }
-      try {
-        if (null != stmt) {
-          stmt.close()
-        }
-      } catch {
-        case e: Exception => logWarning("Exception closing statement", e)
-      }
-      try {
-        if (null != conn) {
-          conn.close()
-        }
-        logInfo("closed connection")
-      } catch {
-        case e: Exception => logWarning("Exception closing connection", e)
-      }
-    }
-
-    override def hasNext: Boolean = {
-      if (!finished) {
-        if (!gotNext) {
-          nextValue = getNext()
-          if (finished) {
-            close()
+      def close() {
+        if (closed) return
+        try {
+          if (null != rs) {
+            rs.close()
           }
-          gotNext = true
+        } catch {
+          case e: Exception => logWarning("Exception closing resultset", e)
+        }
+        try {
+          if (null != stmt) {
+            stmt.close()
+          }
+        } catch {
+          case e: Exception => logWarning("Exception closing statement", e)
+        }
+        try {
+          if (null != conn) {
+            conn.close()
+          }
+          logInfo("closed connection")
+        } catch {
+          case e: Exception => logWarning("Exception closing connection", e)
         }
       }
-      !finished
-    }
 
-    override def next(): InternalRow = {
-      if (!hasNext) {
-        throw new NoSuchElementException("End of stream")
+      override def hasNext: Boolean = {
+        if (!finished) {
+          if (!gotNext) {
+            nextValue = getNext()
+            if (finished) {
+              close()
+            }
+            gotNext = true
+          }
+        }
+        !finished
       }
-      gotNext = false
-      nextValue
+
+      override def next(): InternalRow = {
+        if (!hasNext) {
+          throw new NoSuchElementException("End of stream")
+        }
+        gotNext = false
+        nextValue
+      }
     }
-  }
 }
