@@ -17,26 +17,152 @@
 
 package org.apache.spark.sql.execution.datasources.jdbc
 
-import java.util.Properties
+import java.text.SimpleDateFormat
+import java.util.{Date, Properties}
 
-import scala.collection.mutable.ArrayBuffer
-
-import org.apache.spark.Partition
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Row, SQLContext, SaveMode}
+import org.apache.spark.{Logging, Partition}
+
+import scala.collection.mutable.ArrayBuffer
 
 /**
  * Instructions on how to partition the table among workers.
  */
 private[sql] case class JDBCPartitioningInfo(
-    column: String,
-    lowerBound: Long,
-    upperBound: Long,
-    numPartitions: Int)
+                                              column: String,
+                                              lowerBound: Long,
+                                              upperBound: Long,
+                                              numPartitions: Int)
 
-private[sql] object JDBCRelation {
+private[sql] case class JDBCPartitioningInfoS(
+                                               column: String,
+                                               lowerBound: String,
+                                               upperBound: String,
+                                               numPartitions: Int)
+
+private[sql] object JDBCRelation extends Logging {
+
+  object PColumnType extends Enumeration {
+    type PColumnType = Value
+    val STRING, DATETIME, LONG, DOUBLE = Value
+  }
+
+  def columnPartitionWithType(partitioning: JDBCPartitioningInfoS): Array[Partition] = {
+    if (partitioning == null) return Array[Partition](JDBCPartition(null, 0))
+
+    var numPartitions = partitioning.numPartitions
+    val sColumn = partitioning.column
+    val (column, colType) = {
+      if (sColumn.contains(" ")) {
+        (sColumn.split(" ")(0).trim, sColumn.split(" ")(1).trim.toUpperCase)
+      } else {
+        (partitioning.column, "STRING")
+      }
+    }
+    log.warn("  columnPartitionWithType numP " + numPartitions)
+    log.warn("  columnPartitionWithType column " + column)
+    log.warn("  columnPartitionWithType colType " + colType)
+    val step: Long = colType match {
+      case "STRING" | "LONG" =>
+        sColumn.split(" ")(2).trim.toLong
+      case "DATETIME" => {
+        // in millisecond
+        val l = sColumn.split(" ")
+        if (l.length != 4) 86400 * 1000 else l(3).trim.toLong * 1000
+      }
+    }
+
+    log.warn("  columnPartitionWithType step " + step)
+
+    val (lLowerBound: Long, lUpperBound: Long,
+    format: String, simpleFormat: SimpleDateFormat) = colType match {
+      case "STRING" => {
+        if (numPartitions > 2) numPartitions = 1
+        (partitioning.lowerBound, partitioning.upperBound,"", new SimpleDateFormat)
+      }
+      case "DATETIME" => {
+        val sFormat = sColumn.split(" ")(2).trim
+        log.warn("  columnPartitionWithType sFormat " + sFormat)
+        val format = sFormat match {
+          case "yyyyMMddhhmmss" => "yyyyMMddhhmmss"
+          case _ => "yyyyMMddhhmmss"
+        }
+        val simpleFormat = new SimpleDateFormat(format)
+        (simpleFormat.parse(partitioning.lowerBound).getTime,
+          simpleFormat.parse(partitioning.upperBound).getTime,
+          format, simpleFormat)
+      }
+      case "LONG" =>
+        (partitioning.lowerBound.toLong,
+          partitioning.upperBound.toLong
+          , "", new SimpleDateFormat)
+      case _ => {
+        if (numPartitions > 2) numPartitions = 2
+        (partitioning.lowerBound.toLong,
+          partitioning.upperBound.toLong
+          , "", new SimpleDateFormat)
+      }
+    }
+    log.warn("  columnPartitionWithType lower " + lLowerBound)
+    log.warn("  columnPartitionWithType upper " + lUpperBound)
+    log.warn("  columnPartitionWithType format " + format)
+
+    if (numPartitions == 1) return Array[Partition](JDBCPartition(null, 0))
+    // Overflow and silliness can happen if you subtract then divide.
+    // Here we get a little roundoff, but that's (hopefully) OK.
+    var ans = new ArrayBuffer[Partition]()
+    colType match {
+      case "STRING" =>
+      case "LONG" | "DATETIME" => {
+        var resigned = false
+        var i: Int = 0
+        var currentValue: Long = lLowerBound
+        while (currentValue < lUpperBound) {
+          val lowerBound = colType match {
+            case "LONG" =>
+              s"$column >= $currentValue"
+            case "DATETIME" =>
+              column + " >= " + simpleFormat.format(new Date(currentValue))
+          }
+
+          currentValue = if (resigned) {
+            currentValue + step
+          }
+          else {
+            resigned = true
+            Math.min(((currentValue + step) / step).toInt * step, lUpperBound).toLong
+          }
+
+          log.warn("  columnPartitionWithType currentValue " + currentValue)
+          //TODO why i-1 and 0 is different?
+          val upperBound =
+            colType match {
+              case "LONG" =>
+                s"$column < $currentValue"
+              case "DATETIME" =>
+                column + " < " + simpleFormat.format(new Date(currentValue))
+            }
+
+          val whereClause =
+            if (upperBound == null) {
+              lowerBound
+            } else if (lowerBound == null) {
+              upperBound
+            } else {
+              s"$lowerBound AND $upperBound"
+            }
+          ans += JDBCPartition(whereClause, i)
+          i = i + 1
+        }
+      }
+      case _ => // TODO not supported now
+    }
+    ans.toArray
+  }
+
   /**
    * Given a partitioning schematic (a column of integral type, a number of
    * partitions, and upper and lower bounds on the column's value), generate
@@ -54,7 +180,7 @@ private[sql] object JDBCRelation {
     // Overflow and silliness can happen if you subtract then divide.
     // Here we get a little roundoff, but that's (hopefully) OK.
     val stride: Long = (partitioning.upperBound / numPartitions
-                      - partitioning.lowerBound / numPartitions)
+      - partitioning.lowerBound / numPartitions)
     var i: Int = 0
     var currentValue: Long = partitioning.lowerBound
     var ans = new ArrayBuffer[Partition]()
@@ -78,11 +204,12 @@ private[sql] object JDBCRelation {
 }
 
 private[sql] case class JDBCRelation(
-    url: String,
-    table: String,
-    parts: Array[Partition],
-    properties: Properties = new Properties())(@transient val sqlContext: SQLContext)
+                                      url: String,
+                                      table: String,
+                                      parts: Array[Partition],
+                                      properties: Properties = new Properties())(@transient val sqlContext: SQLContext)
   extends BaseRelation
+  with Logging
   with PrunedFilteredScan
   with InsertableRelation {
 
@@ -93,6 +220,15 @@ private[sql] case class JDBCRelation(
   override def buildScan(requiredColumns: Array[String], filters: Array[Filter]): RDD[Row] = {
     val driver: String = DriverRegistry.getDriverClassName(url)
     // Rely on a type erasure hack to pass RDD[InternalRow] back as RDD[Row]
+    log.warn("  UE JDBCRelation.buildScan filters size is " + filters.length)
+    log.warn("  UE JDBCRelation.buildScan parts size is " + parts.length)
+    parts.foreach(p => {
+      p.isInstanceOf[JDBCPartition] match {
+        case true => log.warn(" partition whereClause is " + p.asInstanceOf[JDBCPartition].whereClause)
+        case false => log.warn("  partition is Partition instance")
+        case _ =>
+      }
+    })
     JDBCRDD.scanTable(
       sqlContext.sparkContext,
       schema,

@@ -90,6 +90,7 @@ case class CreateTempTableUsing(
     options: Map[String, String]) extends RunnableCommand {
 
   def run(sqlContext: SQLContext): Seq[Row] = {
+    options.foreach{ case(k, v) => log.warn(s"  option in CreateTempTableUsing.run is $k:$v")}
     val resolved = ResolvedDataSource(
       sqlContext, userSpecifiedSchema, Array.empty[String], provider, options)
     sqlContext.catalog.registerTable(

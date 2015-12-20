@@ -17,9 +17,10 @@
 
 package org.apache.spark.sql.execution.datasources.jdbc
 
-import java.sql.{Connection, DriverManager, ResultSet, SQLException}
+import java.sql.{Connection, DriverManager, PreparedStatement, ResultSet, SQLException, Statement}
 import java.util.Properties
 
+import org.apache.commons.lang.ArrayUtils
 import org.apache.commons.lang3.StringUtils
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
@@ -130,13 +131,12 @@ private[sql] object JDBCRDD extends Logging {
     try {
       var rs = conn.prepareStatement(s"SELECT * FROM $table WHERE 1=0").executeQuery()
       if (rs == null) {
-        log.warn("rs is null, try to use statement and limit 1 query with reconnection")
+        log.debug("  rs is null, try to use statement and limit 1 query with reconnection")
         conn.close
         conn = getConnector(properties.getProperty("driver"), url, properties)()
         val stmt = conn.createStatement()
         stmt.execute(s"SELECT * FROM $table limit 1")
         rs = stmt.getResultSet
-        log.warn("rs is null? " + (rs == null))
       }
 
       try {
@@ -160,6 +160,7 @@ private[sql] object JDBCRDD extends Logging {
           val columnType =
             dialect.getCatalystType(dataType, typeName, fieldSize, metadata).getOrElse(
               getCatalystType(dataType, fieldSize, fieldScale, isSigned))
+          log.debug("  resolveTable: field name is " + columnName + "  type is " + dataType)
           fields(i) = StructField(columnName, columnType, nullable, metadata.build())
           i = i + 1
         }
@@ -237,6 +238,8 @@ private[sql] object JDBCRDD extends Logging {
                  filters: Array[Filter],
                  parts: Array[Partition]): RDD[InternalRow] = {
     val dialect = JdbcDialects.get(url)
+    log.debug("  dialect is instance of UniEngineDialect: ")
+    // debug
     val quotedColumns = requiredColumns.map(colName => dialect.quoteIdentifier(colName))
     new JDBCRDD(
       sc,
@@ -277,6 +280,7 @@ private[sql] class JDBCRDD(
   private val columnList: String = {
     val sb = new StringBuilder()
     columns.foreach(x => sb.append(",").append(x))
+    //
     if (sb.length == 0) "1" else sb.substring(1)
   }
 
@@ -391,7 +395,7 @@ private[sql] class JDBCRDD(
 
       context.addTaskCompletionListener { context => close() }
       val part = thePart.asInstanceOf[JDBCPartition]
-      val conn = getConnection()
+      var conn = getConnection()
 
       // H2's JDBC driver does not support the setSchema() method.  We pass a
       // fully-qualified table name in the SELECT statement.  I don't know how to
@@ -400,11 +404,47 @@ private[sql] class JDBCRDD(
       val myWhereClause = getWhereClause(part)
 
       val sqlText = s"SELECT $columnList FROM $fqTable $myWhereClause"
-      val stmt = conn.prepareStatement(sqlText,
-        ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)
+
+      val stmt = {
+        val stmt = conn.prepareStatement(sqlText,
+          ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)
+        // some driver may not support PreparedStatement, use Statement instead.
+        if (stmt == null) {
+          // to deal with UE's code
+          log.debug("  stmt is null, reconnet.")
+          conn.close()
+          conn = getConnection()
+          conn.createStatement
+        } else {
+          stmt
+        }
+      }
+
       val fetchSize = properties.getProperty("fetchsize", "0").toInt
       stmt.setFetchSize(fetchSize)
-      val rs = stmt.executeQuery()
+      val rs = {
+        stmt match {
+          // some driver may not support PreparedStatement, use Statement instead.
+          case s: Statement =>
+            log.debug(s"  fetchSize:  $fetchSize")
+            log.debug(s" querying data using statement.executeQuery(sql) with $sqlText")
+            var tmpRs:ResultSet = null
+            try {
+              tmpRs = s.executeQuery(sqlText)
+            }catch{
+              case e: Exception =>
+                // To talk with MDSS
+                log.warn(s" failed, try again with statement.executeQuery(sql) with $sqlText;")
+                tmpRs = s.executeQuery(sqlText+";")
+            }finally {
+
+            }
+            tmpRs
+          case p: PreparedStatement =>
+            log.debug(s" querying data using preparedStatement.executeQuery with $sqlText")
+            p.executeQuery
+        }
+      }
 
       val conversions = getConversions(schema)
       val mutableRow = new SpecificMutableRow(schema.fields.map(x => x.dataType))
@@ -452,7 +492,9 @@ private[sql] class JDBCRDD(
                 } else {
                   mutableRow.update(i, null)
                 }
-              case BinaryConversion => mutableRow.update(i, rs.getBytes(pos))
+              case BinaryConversion => {
+                mutableRow.update(i, rs.getBytes(pos))
+              }
               case BinaryLongConversion => {
                 val bytes = rs.getBytes(pos)
                 var ans = 0L
@@ -464,7 +506,8 @@ private[sql] class JDBCRDD(
                 mutableRow.setLong(i, ans)
               }
             }
-            if (rs.wasNull) mutableRow.setNullAt(i)
+            // TODO: dangerous! UE now support rs.wasNull, so ignore this, means , always not null. This will ignore null values, it is not correct.
+//            if (rs.wasNull) mutableRow.setNullAt(i)
             i = i + 1
           }
           mutableRow

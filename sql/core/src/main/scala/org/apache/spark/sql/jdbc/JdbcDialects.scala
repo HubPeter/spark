@@ -126,6 +126,7 @@ object JdbcDialects {
   registerDialect(MySQLDialect)
   registerDialect(PostgresDialect)
   registerDialect(OracleDialect)
+  registerDialect(UniEngineDialect)
 
   /**
    * Fetch the JdbcDialect class corresponding to a given database url.
@@ -221,6 +222,22 @@ case object MySQLDialect extends JdbcDialect {
 
   override def quoteIdentifier(colName: String): String = {
     s"`$colName`"
+  }
+}
+
+/**
+ * :: DeveloperApi ::
+ * Default uniform query engine dialect to generate column names correctly.
+ */
+@DeveloperApi
+case object UniEngineDialect extends JdbcDialect {
+  override def canHandle(url : String): Boolean = {
+    println(" canHandle url: " + url + "  " + url.startsWith("jdbc:sciuec") )
+    url.startsWith("jdbc:sciuec")
+  }
+
+  override def quoteIdentifier(colName: String): String = {
+    s"$colName"
   }
 }
 

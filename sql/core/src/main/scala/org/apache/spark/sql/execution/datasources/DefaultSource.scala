@@ -17,21 +17,26 @@
 
 package org.apache.spark.sql.execution.datasources
 
+import java.io.{PrintWriter, File}
 import java.util.Properties
 
+import org.apache.spark.Logging
 import org.apache.spark.sql.SQLContext
-import org.apache.spark.sql.execution.datasources.jdbc.{JDBCRelation, JDBCPartitioningInfo, DriverRegistry}
+import org.apache.spark.sql.execution.datasources.jdbc._
 import org.apache.spark.sql.sources.{BaseRelation, DataSourceRegister, RelationProvider}
 
+import scala.collection.mutable.ArrayBuffer
 
-class DefaultSource extends RelationProvider with DataSourceRegister {
+
+class DefaultSource extends RelationProvider with DataSourceRegister with Logging{
 
   override def shortName(): String = "jdbc"
 
   /** Returns a new base relation with the given parameters. */
   override def createRelation(
-      sqlContext: SQLContext,
-      parameters: Map[String, String]): BaseRelation = {
+                               sqlContext: SQLContext,
+                               parameters: Map[String, String]): BaseRelation = {
+
     val url = parameters.getOrElse("url", sys.error("Option 'url' not specified"))
     val driver = parameters.getOrElse("driver", null)
     val table = parameters.getOrElse("dbtable", sys.error("Option 'dbtable' not specified"))
@@ -39,6 +44,18 @@ class DefaultSource extends RelationProvider with DataSourceRegister {
     val lowerBound = parameters.getOrElse("lowerBound", null)
     val upperBound = parameters.getOrElse("upperBound", null)
     val numPartitions = parameters.getOrElse("numPartitions", null)
+    val wherePartitions = parameters.getOrElse("wherePartitions", null)
+
+    val file = new File("/tmp/sql.log")
+    val w = new PrintWriter(file)
+    w.write("  url: " + url + "\n")
+    w.write("  driver: " + driver + "\n")
+    w.write("  table: " + table + "\n")
+    w.write("  partitionCOlumn: " + partitionColumn + "\n")
+    w.write("  lowerBound: " + lowerBound + "\n")
+    w.write("  upperBound: " + upperBound + "\n")
+    w.write("  numPartitions: " + numPartitions + "\n")
+    w.write("  wherePartitions: " + wherePartitions + "\n")
 
     if (driver != null) DriverRegistry.register(driver)
 
@@ -50,15 +67,43 @@ class DefaultSource extends RelationProvider with DataSourceRegister {
     val partitionInfo = if (partitionColumn == null) {
       null
     } else {
-      JDBCPartitioningInfo(
+      JDBCPartitioningInfoS(
         partitionColumn,
-        lowerBound.toLong,
-        upperBound.toLong,
+        lowerBound,
+        upperBound,
         numPartitions.toInt)
     }
-    val parts = JDBCRelation.columnPartition(partitionInfo)
+
+    // TODO try to get partitions manually if partiitonColumn is null
+    val parts = if (partitionInfo == null && wherePartitions != null) {
+      w.write(s"  wherePartitions is $wherePartitions" + "\n")
+      var ans = new ArrayBuffer[org.apache.spark.Partition]()
+      wherePartitions.split(",").zipWithIndex.map {
+        case (wp, index) =>
+          ans += JDBCPartition(wp.trim, index)
+      }
+      ans.toArray
+    } else if(partitionInfo!=null) {
+      log.warn("  partitionInfo is not null, use columnPartition")
+      log.warn("  partitioninfo is l:" + partitionInfo.lowerBound + " u:" +partitionInfo.upperBound + " n:" + partitionInfo.numPartitions + " c:" + partitionInfo.column)
+      JDBCRelation.columnPartitionWithType(partitionInfo)
+    }else{
+      log.warn("  no way to get partitions partitionInfo and wherePartitions is all null.")
+      null
+    }
     val properties = new Properties() // Additional properties that we will pass to getConnection
     parameters.foreach(kv => properties.setProperty(kv._1, kv._2))
+    w.write("  parts size is " + parts.length+"\n")
+    parts.foreach(p => {
+      p.isInstanceOf[JDBCPartition] match {
+        case true => w.write("  partition(" + p.asInstanceOf[JDBCPartition].whereClause + ")"+"\n")
+        case false => w.write(" partition is not JDBCPartition instance. index is " + p.index+"\n")
+        case _ => w.write("  partition not Partition or JDBCPartition instance"+"\n")
+      }
+    })
+    w.write("  parts length is " + parts.length+"\n")
+    w.flush()
+    w.close()
     JDBCRelation(url, table, parts, properties)(sqlContext)
   }
 }

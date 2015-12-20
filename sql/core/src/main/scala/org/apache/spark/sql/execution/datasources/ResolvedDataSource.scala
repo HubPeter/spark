@@ -19,6 +19,9 @@ package org.apache.spark.sql.execution.datasources
 
 import java.util.ServiceLoader
 
+import org.apache.commons.collections.MapUtils
+import org.apache.commons.lang.ArrayUtils
+
 import scala.collection.JavaConversions._
 import scala.language.{existentials, implicitConversions}
 import scala.util.{Success, Failure, Try}
@@ -84,6 +87,9 @@ object ResolvedDataSource extends Logging {
       partitionColumns: Array[String],
       provider: String,
       options: Map[String, String]): ResolvedDataSource = {
+    log.warn("  partitionColumns is " + ArrayUtils.toString(partitionColumns))
+    log.warn("  provider is " + provider)
+    options.foreach{case(k,v)=> log.warn(s"  option is $k:$v")}
     val clazz: Class[_] = lookupDataSource(provider)
     def className: String = clazz.getCanonicalName
     val relation = userSpecifiedSchema match {
@@ -121,8 +127,10 @@ object ResolvedDataSource extends Logging {
       }
 
       case None => clazz.newInstance() match {
-        case dataSource: RelationProvider =>
+        case dataSource: RelationProvider => {
+          options.foreach(o => log.warn(s" optitn is $o"))
           dataSource.createRelation(sqlContext, new CaseInsensitiveMap(options))
+        }
         case dataSource: HadoopFsRelationProvider =>
           val caseInsensitiveOptions = new CaseInsensitiveMap(options)
           val paths = {
