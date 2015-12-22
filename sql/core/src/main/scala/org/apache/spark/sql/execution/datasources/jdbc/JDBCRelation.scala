@@ -87,8 +87,8 @@ private[sql] object JDBCRelation extends Logging {
         val sFormat = sColumn.split(" ")(2).trim
         log.warn("  columnPartitionWithType sFormat " + sFormat)
         val format = sFormat match {
-          case "yyyyMMddhhmmss" => "yyyyMMddhhmmss"
-          case _ => "yyyyMMddhhmmss"
+          case "yyyyMMddHHmmss" => "yyyyMMddHHmmss"
+          case _ => "yyyyMMddHHmmss"
         }
         val simpleFormat = new SimpleDateFormat(format)
         (simpleFormat.parse(partitioning.lowerBound).getTime,
@@ -129,7 +129,7 @@ private[sql] object JDBCRelation extends Logging {
           }
 
           currentValue = if (resigned) {
-            currentValue + step
+            Math.min( currentValue + step, lUpperBound )
           }
           else {
             resigned = true
