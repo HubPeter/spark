@@ -89,7 +89,6 @@ object ResolvedDataSource extends Logging {
       options: Map[String, String]): ResolvedDataSource = {
     log.warn("  partitionColumns is " + ArrayUtils.toString(partitionColumns))
     log.warn("  provider is " + provider)
-    options.foreach{case(k,v)=> log.warn(s"  option is $k:$v")}
     val clazz: Class[_] = lookupDataSource(provider)
     def className: String = clazz.getCanonicalName
     val relation = userSpecifiedSchema match {

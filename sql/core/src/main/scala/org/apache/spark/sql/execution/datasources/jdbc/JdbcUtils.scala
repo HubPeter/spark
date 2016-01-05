@@ -36,7 +36,7 @@ object JdbcUtils extends Logging {
    * Establishes a JDBC connection.
    */
   def createConnection(url: String, connectionProperties: Properties): Connection = {
-    JDBCRDD.getConnector(connectionProperties.getProperty("driver"), url, connectionProperties)()
+    JDBCRDD.getConnector(connectionProperties.getProperty("driver"), url, connectionProperties)(0)
   }
 
   /**
@@ -84,12 +84,12 @@ object JdbcUtils extends Logging {
    * are used.
    */
   def savePartition(
-      getConnection: () => Connection,
+      getConnection: (Int) => Connection,
       table: String,
       iterator: Iterator[Row],
       rddSchema: StructType,
       nullTypes: Array[Int]): Iterator[Byte] = {
-    val conn = getConnection()
+    val conn = getConnection(0)
     var committed = false
     try {
       conn.setAutoCommit(false) // Everything in the same db transaction.
@@ -210,7 +210,7 @@ object JdbcUtils extends Logging {
 
     val rddSchema = df.schema
     val driver: String = DriverRegistry.getDriverClassName(url)
-    val getConnection: () => Connection = JDBCRDD.getConnector(driver, url, properties)
+    val getConnection: (Int) => Connection = JDBCRDD.getConnector(driver, url, properties)
     df.foreachPartition { iterator =>
       savePartition(getConnection, table, iterator, rddSchema, nullTypes)
     }

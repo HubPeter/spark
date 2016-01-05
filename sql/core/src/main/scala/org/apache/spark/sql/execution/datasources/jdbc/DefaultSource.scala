@@ -49,10 +49,10 @@ class DefaultSource extends RelationProvider with DataSourceRegister {
       null
     } else {
       JDBCPartitioningInfoS(
-        partitionColumn,
-        lowerBound,
-        upperBound,
-        numPartitions.toInt)
+        partitionColumn.trim,
+        lowerBound.trim,
+        upperBound.trim,
+        numPartitions.trim.toInt)
     }
     val parts = JDBCRelation.columnPartitionWithType(partitionInfo)
     val properties = new Properties() // Additional properties that we will pass to getConnection

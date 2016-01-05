@@ -20,7 +20,6 @@ package org.apache.spark.sql.execution.datasources.jdbc
 import java.sql.{Connection, DriverManager, PreparedStatement, ResultSet, SQLException, Statement}
 import java.util.Properties
 
-import org.apache.commons.lang.ArrayUtils
 import org.apache.commons.lang3.StringUtils
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
@@ -126,27 +125,43 @@ private[sql] object JDBCRDD extends Logging {
    */
 
   def resolveTable(url: String, table: String, properties: Properties): StructType = {
-    val dialect = JdbcDialects.get(url)
-    var conn: Connection = getConnector(properties.getProperty("driver"), url, properties)()
+    // To support multiple jdbc servers
+    val dialect = JdbcDialects.get(url.split(",")(0))
+    var conn: Connection = getConnector(properties.getProperty("driver"), url, properties)(0)
     try {
-      var rs = conn.prepareStatement(s"SELECT * FROM $table WHERE 1=0").executeQuery()
-      if (rs == null) {
-        log.debug("  rs is null, try to use statement and limit 1 query with reconnection")
-        conn.close
-        conn = getConnector(properties.getProperty("driver"), url, properties)()
-        val stmt = conn.createStatement()
-        stmt.execute(s"SELECT * FROM $table limit 1")
+      val stmt = conn.createStatement
+      var rs: ResultSet = null
+      try {
+        stmt.execute(s"SELECT * FROM $table WHERE 1=0")
         rs = stmt.getResultSet
+      } catch {
+        case e: Exception =>
+          if (rs == null) {
+            log.debug("  rs is null, try to use statement and limit 1 query with reconnection")
+            conn.close()
+            conn = getConnector(properties.getProperty("driver"), url, properties)(0)
+            val stmt = conn.createStatement()
+            stmt.execute(s"SELECT * FROM $table limit 1")
+            rs = stmt.getResultSet
+          }
       }
-
       try {
         val rsmd = rs.getMetaData
         val ncols = rsmd.getColumnCount
         val fields = new Array[StructField](ncols)
         var i = 0
         while (i < ncols) {
-          val columnName = rsmd.getColumnLabel(i + 1);
-          val dataType = rsmd.getColumnType(i + 1)
+          val columnName = rsmd.getColumnLabel(i + 1)
+          // UE types specific issues
+          var dataType: Int = 0
+          try {
+            dataType = rsmd.getColumnType(i + 1)
+          } catch {
+            case e: SQLException =>
+              throw e
+            case e => throw e
+          }
+
           val typeName = rsmd.getColumnTypeName(i + 1)
           //          val fieldSize = rsmd.getPrecision(i + 1)
           val fieldSize = 50
@@ -157,10 +172,10 @@ private[sql] object JDBCRDD extends Logging {
           //          val nullable = rsmd.isNullable(i + 1) != ResultSetMetaData.columnNoNulls
           val nullable = true
           val metadata = new MetadataBuilder().putString("name", columnName)
+          log.warn("  resolveTable: field name is " + columnName + "  type is " + dataType)
           val columnType =
             dialect.getCatalystType(dataType, typeName, fieldSize, metadata).getOrElse(
               getCatalystType(dataType, fieldSize, fieldScale, isSigned))
-          log.debug("  resolveTable: field name is " + columnName + "  type is " + dataType)
           fields(i) = StructField(columnName, columnType, nullable, metadata.build())
           i = i + 1
         }
@@ -200,15 +215,20 @@ private[sql] object JDBCRDD extends Logging {
    *
    * @return A function that loads the driver and connects to the url.
    */
-  def getConnector(driver: String, url: String, properties: Properties): () => Connection = {
-    () => {
+  def getConnector(driver: String, url: String, properties: Properties): (Int) => Connection = {
+    (index: Int) => {
       try {
         if (driver != null) DriverRegistry.register(driver)
       } catch {
         case e: ClassNotFoundException =>
           logWarning(s"Couldn't find class $driver", e)
       }
-      DriverManager.getConnection(url, properties)
+      // to support multiple jdbc servers
+      val urls = url.split(",")
+      log.warn("  urls length is " + urls.length)
+      log.warn("  index " + index)
+      urls.foreach { url => log.warn(s"  url is $url") }
+      DriverManager.getConnection(urls(index % urls.length), properties)
     }
   }
 
@@ -237,7 +257,7 @@ private[sql] object JDBCRDD extends Logging {
                  requiredColumns: Array[String],
                  filters: Array[Filter],
                  parts: Array[Partition]): RDD[InternalRow] = {
-    val dialect = JdbcDialects.get(url)
+    val dialect = JdbcDialects.get(url.split(",")(0))
     log.debug("  dialect is instance of UniEngineDialect: ")
     // debug
     val quotedColumns = requiredColumns.map(colName => dialect.quoteIdentifier(colName))
@@ -260,7 +280,7 @@ private[sql] object JDBCRDD extends Logging {
  */
 private[sql] class JDBCRDD(
                             sc: SparkContext,
-                            getConnection: () => Connection,
+                            getConnection: (Int) => Connection,
                             schema: StructType,
                             fqTable: String,
                             columns: Array[String],
@@ -395,7 +415,8 @@ private[sql] class JDBCRDD(
 
       context.addTaskCompletionListener { context => close() }
       val part = thePart.asInstanceOf[JDBCPartition]
-      var conn = getConnection()
+      log.warn("  thePart.index is " + thePart.index)
+      var conn = getConnection(thePart.index)
 
       // H2's JDBC driver does not support the setSchema() method.  We pass a
       // fully-qualified table name in the SELECT statement.  I don't know how to
@@ -411,9 +432,9 @@ private[sql] class JDBCRDD(
         // some driver may not support PreparedStatement, use Statement instead.
         if (stmt == null) {
           // to deal with UE's code
-          log.debug("  stmt is null, reconnet.")
+          log.warn("  stmt is null, reconnet.")
           conn.close()
-          conn = getConnection()
+          conn = getConnection(thePart.index)
           conn.createStatement
         } else {
           stmt
@@ -426,22 +447,22 @@ private[sql] class JDBCRDD(
         stmt match {
           // some driver may not support PreparedStatement, use Statement instead.
           case s: Statement =>
-            log.debug(s"  fetchSize:  $fetchSize")
-            log.debug(s" querying data using statement.executeQuery(sql) with $sqlText")
-            var tmpRs:ResultSet = null
+            log.warn(s"  fetchSize:  $fetchSize")
+            log.warn(s" querying data using statement.executeQuery(sql) with $sqlText")
+            var tmpRs: ResultSet = null
             try {
               tmpRs = s.executeQuery(sqlText)
-            }catch{
+            } catch {
               case e: Exception =>
-                // To talk with MDSS
+                // To talk with MDSS, that nee ';' to end query.
                 log.warn(s" failed, try again with statement.executeQuery(sql) with $sqlText;")
-                tmpRs = s.executeQuery(sqlText+";")
-            }finally {
+                tmpRs = s.executeQuery(sqlText + ";")
+            } finally {
 
             }
             tmpRs
           case p: PreparedStatement =>
-            log.debug(s" querying data using preparedStatement.executeQuery with $sqlText")
+            log.warn(s" querying data using preparedStatement.executeQuery with $sqlText")
             p.executeQuery
         }
       }
@@ -507,7 +528,7 @@ private[sql] class JDBCRDD(
               }
             }
             // TODO: dangerous! UE now support rs.wasNull, so ignore this, means , always not null. This will ignore null values, it is not correct.
-//            if (rs.wasNull) mutableRow.setNullAt(i)
+            //            if (rs.wasNull) mutableRow.setNullAt(i)
             i = i + 1
           }
           mutableRow

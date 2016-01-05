@@ -8,6 +8,7 @@ zip -u -r /home/w/dist/spark-1.5.2-bin-hadoop2.6/lib/spark-assembly-1.5.2-hadoop
 cd ../../../
 
 scp /home/w/dist/spark-1.5.2-bin-hadoop2.6/lib/spark-assembly-1.5.2-hadoop2.6.0.jar root@m108:/home/liudepeng/spark-1.5.2-bin-hadoop2.6/lib/
+scp /home/w/dist/spark-1.5.2-bin-hadoop2.6/lib/spark-assembly-1.5.2-hadoop2.6.0.jar root@m107:/home/liudepeng/spark-1.5.2-bin-hadoop2.6/lib/
 
 echo 'thrift server restarting...'
 
