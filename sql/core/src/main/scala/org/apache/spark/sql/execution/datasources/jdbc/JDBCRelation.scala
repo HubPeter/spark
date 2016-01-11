@@ -21,7 +21,9 @@ import java.sql.SQLException
 import java.text.SimpleDateFormat
 import java.util.{Date, Properties}
 
+import org.apache.commons.lang.ArrayUtils
 import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.execution.datasources.jdbc.JDBCRelation.PColumnType.PColumnType
 import org.apache.spark.sql.sources._
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{DataFrame, Row, SQLContext, SaveMode}
@@ -59,114 +61,110 @@ private[sql] object JDBCRelation extends Logging {
   }
 
   def columnPartitionWithType(partitioning: JDBCPartitioningInfoS): Array[Partition] = {
-    if (partitioning == null) return Array[Partition](JDBCPartition(null, 0))
+    if (partitioning == null || partitioning.column.isEmpty) return Array[Partition](JDBCPartition(null, 0))
+    val tmpA: Array[String] = partitioning.column.trim.replaceAll("\\s", " ").split(" ")
+    log.warn("  column is _" + partitioning.column + "_")
+    log.warn("  column is _" + ArrayUtils.toString(tmpA) + "_")
 
-    val numPartitions = partitioning.numPartitions
-    val sColumn = partitioning.column
-    log.warn("  sColumn is _" + sColumn + "_")
-    val (column, colType) = {
-      if (sColumn.contains(" ")) {
-        (sColumn.split("\\s+")(0).trim, PColumnType.parse(sColumn.split("\\s+")(1).trim.toUpperCase))
-      } else {
-        (partitioning.column, PColumnType.NONE)
+    val (column: String,
+    colType: PColumnType,
+    simpleFormat: SimpleDateFormat,
+    step: Long) =
+      partitioning.column.trim.replaceAll("\\s", " ").split(" ") match {
+        case Array(colName, colTypeStr, sStep) =>
+          log.warn("  step is " + sStep)
+          Tuple4(colName,
+            if (PColumnType.parse(colTypeStr.toUpperCase) == PColumnType.BIGINT)
+              PColumnType.BIGINT
+            else PColumnType.NONE,
+            new SimpleDateFormat,
+            if (PColumnType.parse(colTypeStr.toUpperCase) == PColumnType.BIGINT)
+              sStep.toLong
+            else 0
+          )
+        case Array(colName, colTypeStr, sFormat, sStep) =>
+          log.warn("  format is " + sFormat)
+          Tuple4(colName,
+          if (PColumnType.parse(colTypeStr.toUpperCase) == PColumnType.TIMESTAMP)
+            PColumnType.TIMESTAMP
+          else PColumnType.NONE, {
+            log.warn("  columnPartitionWithType sFormat " + sFormat)
+            val realFormatStr = sFormat match {
+              case "yyyyMMddHHmmss" => "yyyyMMddHHmmss"
+              case _ => "yyyyMMddHHmmss"
+            }
+            log.warn("  columnPartitionWithType real format " + realFormatStr)
+            new SimpleDateFormat(realFormatStr)
+          },
+          if (PColumnType.parse(colTypeStr.toUpperCase) == PColumnType.TIMESTAMP)
+            sStep.toLong * 1000 // after this all is in mill seconds
+          else 0
+          )
+        case _ =>
+          Tuple4("", PColumnType.NONE, new SimpleDateFormat, 0)
       }
-    }
-    log.warn("  column is " + column + "  type is " + colType)
 
-    if (numPartitions == 1 || colType == PColumnType.NONE) {
-      log.warn("  numPartitions is " + numPartitions + "  colType is " + colType + " return")
+    if (step == 0 || colType == PColumnType.NONE)
       return Array[Partition](JDBCPartition(null, 0))
-    }
 
-    log.warn("  columnPartitionWithType numP " + numPartitions)
-    log.warn("  columnPartitionWithType column " + column)
-    log.warn("  columnPartitionWithType colType " + colType)
-    val step: Long = colType match {
-      case PColumnType.BIGINT =>
-        sColumn.split("\\s+")(2).trim.toLong
+    val (lLowerBound: Long, lUpperBound: Long) = colType match {
       case PColumnType.TIMESTAMP =>
-        // in millisecond
-        val l = sColumn.split("\\s+")
-        if (l.length != 4) 86400 * 1000 else l(3).trim.toLong * 1000
-    }
-
-    log.warn("  columnPartitionWithType step " + step)
-
-    val (lLowerBound: Long, lUpperBound: Long,
-    format: String, simpleFormat: SimpleDateFormat) = colType match {
-      case PColumnType.TIMESTAMP =>
-        val sFormat = sColumn.split("\\s+")(2).trim
-        log.warn("  columnPartitionWithType sFormat " + sFormat)
-        val format = sFormat match {
-          case "yyyyMMddHHmmss" => "yyyyMMddHHmmss"
-          case _ => "yyyyMMddHHmmss"
-        }
-        val simpleFormat = new SimpleDateFormat(format)
         (simpleFormat.parse(partitioning.lowerBound).getTime,
-          simpleFormat.parse(partitioning.upperBound).getTime,
-          format, simpleFormat)
-
+          simpleFormat.parse(partitioning.upperBound).getTime)
       case PColumnType.BIGINT =>
         (partitioning.lowerBound.toLong,
-          partitioning.upperBound.toLong
-          , "", new SimpleDateFormat)
+          partitioning.upperBound.toLong)
     }
     log.warn("  columnPartitionWithType lower " + lLowerBound)
     log.warn("  columnPartitionWithType upper " + lUpperBound)
-    log.warn("  columnPartitionWithType format " + format)
+
+    if (lUpperBound <= lLowerBound)
+      return Array[Partition](JDBCPartition(null, 0))
 
     // Overflow and silliness can happen if you subtract then divide.
     // Here we get a little roundoff, but that's (hopefully) OK.
     var ans = new ArrayBuffer[Partition]()
-    colType match {
-      case PColumnType.TIMESTAMP | PColumnType.BIGINT =>
-        var resigned = false
-        var i: Int = 0
-        var currentValue: Long = lLowerBound
-        while (currentValue < lUpperBound) {
-          val lowerBound = colType match {
-            case PColumnType.BIGINT =>
-              s"$column >= $currentValue"
-            case PColumnType.TIMESTAMP =>
-              column + " >= " + simpleFormat.format(new Date(currentValue))
-          }
-          log.warn(s"  lowerBound is $lowerBound")
-
-          currentValue = if (resigned) {
-            Math.min(currentValue + step, lUpperBound)
-          }
-          else {
-            resigned = true
-            Math.min(((currentValue + step) / step).toInt * step, lUpperBound)
-          }
-          log.warn("  columnPartitionWithType currentValue " + currentValue)
-          //TODO why i-1 and 0 is different?
-          val upperBound =
-            colType match {
-              case PColumnType.BIGINT =>
-                s"$column < $currentValue"
-              case PColumnType.TIMESTAMP =>
-                column + " < " + simpleFormat.format(new Date(currentValue))
-            }
-          log.warn(s"  upperBound is $upperBound")
-
-          val whereClause =
-            if (upperBound == null) {
-              lowerBound
-            } else if (lowerBound == null) {
-              upperBound
-            } else {
-              s"$lowerBound AND $upperBound"
-            }
-          log.warn(s"  whereClause is $whereClause")
-          ans += JDBCPartition(whereClause, i)
-          i = i + 1
+    var resigned = false
+    var i: Int = 0
+    var currentValue: Long = lLowerBound
+    while (currentValue < lUpperBound) {
+      val lowerBound = colType match {
+        case PColumnType.BIGINT =>
+          s"$column >= $currentValue"
+        case PColumnType.TIMESTAMP =>
+          column + " >= " + simpleFormat.format(new Date(currentValue))
+      }
+      log.warn(s"  lowerBound is $lowerBound")
+      currentValue = if (resigned)
+        Math.min(currentValue + step, lUpperBound)
+      else {
+        resigned = true
+        Math.min(((currentValue + step) / step).toInt * step, lUpperBound)
+      }
+      log.warn("  columnPartitionWithType currentValue " + currentValue)
+      //TODO why i-1 and 0 is different?
+      val upperBound =
+        colType match {
+          case PColumnType.BIGINT => s"$column < $currentValue"
+          case PColumnType.TIMESTAMP =>
+            column + " < " + simpleFormat.format(new Date(currentValue))
         }
+      log.warn(s"  upperBound is $upperBound")
+      val whereClause =
+        if (upperBound == null)
+          lowerBound
+        else if (lowerBound == null)
+          upperBound
+        else
+          s"$lowerBound AND $upperBound"
+      log.warn(s"  whereClause is $whereClause")
+      ans += JDBCPartition(whereClause, i)
+      i = i + 1
     }
     log.warn(" partition num is " + ans.size)
-    if (ans.size > 1000) {
+    if (ans.size > 10000)
       throw new SQLException("too many partitions bigger than 1000")
-    }
+
     ans.toArray
   }
 
