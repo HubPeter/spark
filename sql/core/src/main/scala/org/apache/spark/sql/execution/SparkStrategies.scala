@@ -395,13 +395,10 @@ private[sql] abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
 
   object DDLStrategy extends Strategy {
     def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
-      case CreateTableUsing(tableIdent, userSpecifiedSchema, provider, true, opts, false, _) => {
-        log.warn("  UE appling CreateTempTableUsing  opts size is " + opts.size)
-        log.info("  UE appling CreateTempTableUsing  opts size is " + opts.size)
+      case CreateTableUsing(tableIdent, userSpecifiedSchema, provider, true, opts, false, _) =>
         ExecutedCommand(
           CreateTempTableUsing(
             tableIdent, userSpecifiedSchema, provider, opts)) :: Nil
-      }
       case c: CreateTableUsing if !c.temporary =>
         sys.error("Tables created with SQLContext must be TEMPORARY. Use a HiveContext instead.")
       case c: CreateTableUsing if c.temporary && c.allowExisting =>

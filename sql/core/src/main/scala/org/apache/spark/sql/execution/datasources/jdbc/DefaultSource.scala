@@ -36,12 +36,12 @@ class DefaultSource extends RelationProvider with DataSourceRegister {
     val partitionColumn = parameters.getOrElse("partitionColumn", null)
     val lowerBound = parameters.getOrElse("lowerBound", null)
     val upperBound = parameters.getOrElse("upperBound", null)
-    val numPartitions = parameters.getOrElse("numPartitions", "1")
+    val numPartitions = parameters.getOrElse("numPartitions", null)
 
     if (driver != null) DriverRegistry.register(driver)
 
     if (partitionColumn != null
-      && (lowerBound == null || upperBound == null)) {
+      && (lowerBound == null || upperBound == null || numPartitions == null)) {
       sys.error("Partitioning incompletely specified")
     }
 
@@ -51,7 +51,7 @@ class DefaultSource extends RelationProvider with DataSourceRegister {
       JDBCPartitioningInfoS(
         partitionColumn.trim,
         lowerBound.trim,
-        upperBound.trim,
+        upperBound.trim,// to deal with timestamp range, e.g. '20150101100000'
         numPartitions.trim.toInt)
     }
     val parts = JDBCRelation.columnPartitionWithType(partitionInfo)

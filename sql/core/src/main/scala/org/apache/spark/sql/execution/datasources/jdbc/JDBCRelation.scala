@@ -43,6 +43,7 @@ private[sql] case class JDBCPartitioningInfo(
 private[sql] case class JDBCPartitioningInfoS(
                                                column: String,
                                                lowerBound: String,
+                                               // to deal with timestamp range, e.g. '20150101100000'
                                                upperBound: String,
                                                numPartitions: Int)
 

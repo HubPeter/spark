@@ -87,8 +87,6 @@ object ResolvedDataSource extends Logging {
       partitionColumns: Array[String],
       provider: String,
       options: Map[String, String]): ResolvedDataSource = {
-    log.warn("  partitionColumns is " + ArrayUtils.toString(partitionColumns))
-    log.warn("  provider is " + provider)
     val clazz: Class[_] = lookupDataSource(provider)
     def className: String = clazz.getCanonicalName
     val relation = userSpecifiedSchema match {
@@ -126,10 +124,9 @@ object ResolvedDataSource extends Logging {
       }
 
       case None => clazz.newInstance() match {
-        case dataSource: RelationProvider => {
-          options.foreach(o => log.warn(s" optitn is $o"))
+        case dataSource: RelationProvider =>
           dataSource.createRelation(sqlContext, new CaseInsensitiveMap(options))
-        }
+
         case dataSource: HadoopFsRelationProvider =>
           val caseInsensitiveOptions = new CaseInsensitiveMap(options)
           val paths = {
